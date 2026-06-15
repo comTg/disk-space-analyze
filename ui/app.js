@@ -830,7 +830,7 @@ function renderLargestList() {
 
     row.append(
       nameCell,
-      tableCell(tileSizeLabel(child), "number"),
+      tableCell(largestSizeLabel(child), "number"),
       tableCell(formatPercent(child.size, totalSize), "number"),
       tableCell(formatNumber(child.fileCount), "number"),
       tableCell(formatNumber(displayDirCount(child)), "number")
@@ -902,6 +902,7 @@ function tableCell(text, className = "") {
     cell.className = className;
   }
   cell.textContent = text;
+  cell.title = text;
   return cell;
 }
 
@@ -1039,6 +1040,7 @@ function updateStats(stats = {}, scanId = null) {
 
 function setStatus(message) {
   els.statusText.textContent = message;
+  els.statusText.title = message;
 }
 
 function createScanId() {
@@ -1237,6 +1239,13 @@ function tileSizeLabel(node) {
     ? " · 待展开"
     : "";
   return `${formatBytes(node.size)}${suffix}`;
+}
+
+function largestSizeLabel(node) {
+  if (isExpandableDir(node) && node.size <= 0) {
+    return isPathScanning(node.path) || node.childrenLoading ? "计算中" : "待计算";
+  }
+  return formatBytes(node.size);
 }
 
 function colorForNode(node) {

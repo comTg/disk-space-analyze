@@ -221,11 +221,13 @@ input:disabled {
 
 .drive-item {
   width: 100%;
+  min-width: 0;
   min-height: 68px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #151a21;
+  overflow: hidden;
   text-align: left;
 }
 
@@ -242,12 +244,25 @@ input:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   font-weight: 650;
 }
 
+.drive-title span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .drive-kind {
+  flex: 0 1 auto;
+  max-width: 92px;
   color: var(--muted);
   font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .drive-path {
@@ -274,11 +289,15 @@ input:disabled {
 }
 
 .status-text {
-  min-height: 34px;
+  height: 34px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
-  word-break: break-all;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .scan-progress {
@@ -623,6 +642,10 @@ input:disabled {
   scrollbar-gutter: stable;
 }
 
+.largest-list {
+  container-type: inline-size;
+}
+
 .muted {
   color: var(--muted);
 }
@@ -676,6 +699,7 @@ input:disabled {
 
 .largest-table {
   width: 100%;
+  min-width: 360px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -695,6 +719,7 @@ input:disabled {
   color: var(--soft);
   font-size: 12px;
   line-height: 1.35;
+  overflow: hidden;
 }
 
 .largest-table th {
@@ -704,17 +729,17 @@ input:disabled {
 
 .largest-table th:first-child,
 .largest-table td:first-child {
-  width: 42%;
+  width: 40%;
 }
 
 .largest-table th:nth-child(2),
 .largest-table td:nth-child(2) {
-  width: 20%;
+  width: 24%;
 }
 
 .largest-table th:nth-child(n + 3),
 .largest-table td:nth-child(n + 3) {
-  width: 12.6%;
+  width: 12%;
 }
 
 .largest-table th button,
@@ -726,6 +751,9 @@ input:disabled {
   background: transparent;
   color: inherit;
   text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .largest-table th button:hover,
@@ -737,12 +765,58 @@ input:disabled {
 .largest-table .number {
   text-align: right;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .largest-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@container (max-width: 360px) {
+  .largest-table {
+    min-width: 0;
+  }
+
+  .largest-table th:nth-child(3),
+  .largest-table td:nth-child(3),
+  .largest-table th:nth-child(5),
+  .largest-table td:nth-child(5) {
+    display: none;
+  }
+
+  .largest-table th:first-child,
+  .largest-table td:first-child {
+    width: 56%;
+  }
+
+  .largest-table th:nth-child(2),
+  .largest-table td:nth-child(2) {
+    width: 28%;
+  }
+
+  .largest-table th:nth-child(4),
+  .largest-table td:nth-child(4) {
+    width: 16%;
+  }
+}
+
+@container (max-width: 260px) {
+  .largest-table th:nth-child(4),
+  .largest-table td:nth-child(4) {
+    display: none;
+  }
+
+  .largest-table th:first-child,
+  .largest-table td:first-child {
+    width: 62%;
+  }
+
+  .largest-table th:nth-child(2),
+  .largest-table td:nth-child(2) {
+    width: 38%;
+  }
 }
 
 .largest-table tr.selected td {
