@@ -316,10 +316,10 @@ fn reveal_path(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         let mut command = Command::new("explorer.exe");
-        if target.is_file() {
-            command.arg(format!("/select,{}", path_to_string(&target)));
+        if target.parent().is_some() && target.file_name().is_some() {
+            command.arg("/select,").arg(&target);
         } else {
-            command.arg(path_to_string(&target));
+            command.arg(&target);
         }
         command.spawn().map_err(|error| error.to_string())?;
         return Ok(());

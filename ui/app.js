@@ -41,6 +41,14 @@ const els = {
   contextMenu: document.querySelector("#contextMenu"),
 };
 
+const TREEMAP_GAP = 3;
+const TREEMAP_HEADER_HEIGHT = 22;
+const TREEMAP_MIN_NEST_WIDTH = 150;
+const TREEMAP_MIN_NEST_HEIGHT = 92;
+const TREEMAP_MIN_LABEL_WIDTH = 56;
+const TREEMAP_MIN_LABEL_HEIGHT = 28;
+const TREEMAP_MAX_NEST_DEPTH = 4;
+
 function tauriApi() {
   return window.__TAURI__ || null;
 }
@@ -515,7 +523,7 @@ function renderTreemap() {
   }
 
   const rect = els.treemap.getBoundingClientRect();
-  const layouts = layoutSlice(children, 0, 0, rect.width, rect.height, 0);
+  const layouts = layoutSquarified(children, 0, 0, rect.width, rect.height, 0);
   const fragment = document.createDocumentFragment();
   for (const item of layouts) {
     fragment.appendChild(createTile(item));
@@ -528,44 +536,119 @@ function renderTreemap() {
   }
 }
 
-function layoutSlice(nodes, x, y, width, height, depth) {
+function layoutSquarified(nodes, x, y, width, height, depth) {
   const total = nodes.reduce((sum, node) => sum + weightForNode(node), 0);
   if (!total || width <= 0 || height <= 0) {
     return [];
   }
 
-  const horizontal = width >= height;
-  let offset = 0;
-  const layouts = [];
-
-  nodes.forEach((node, index) => {
-    const ratio = weightForNode(node) / total;
-    const last = index === nodes.length - 1;
-    const tileWidth = horizontal ? (last ? width - offset : width * ratio) : width;
-    const tileHeight = horizontal ? height : (last ? height - offset : height * ratio);
-    const tileX = horizontal ? x + offset : x;
-    const tileY = horizontal ? y : y + offset;
-    offset += horizontal ? tileWidth : tileHeight;
-
-    layouts.push({
+  const items = nodes
+    .map((node) => ({
       node,
-      x: tileX,
-      y: tileY,
-      width: Math.max(0, tileWidth),
-      height: Math.max(0, tileHeight),
-      depth,
-    });
-  });
+      area: Math.max(1, (weightForNode(node) / total) * width * height),
+    }))
+    .filter((item) => item.area > 0);
+  const layouts = [];
+  let row = [];
+  let rowArea = 0;
+  let cursorX = x;
+  let cursorY = y;
+  let remainingWidth = width;
+  let remainingHeight = height;
+
+  while (items.length) {
+    const next = items[0];
+    const side = Math.max(1, Math.min(remainingWidth, remainingHeight));
+    const currentWorst = row.length ? worstAspect(row, rowArea, side) : Infinity;
+    const nextWorst = worstAspect([...row, next], rowArea + next.area, side);
+
+    if (!row.length || nextWorst <= currentWorst) {
+      row.push(next);
+      rowArea += next.area;
+      items.shift();
+      continue;
+    }
+
+    const placed = placeTreemapRow(row, rowArea, cursorX, cursorY, remainingWidth, remainingHeight, depth);
+    layouts.push(...placed.layouts);
+    cursorX = placed.x;
+    cursorY = placed.y;
+    remainingWidth = placed.width;
+    remainingHeight = placed.height;
+    row = [];
+    rowArea = 0;
+  }
+
+  if (row.length) {
+    const placed = placeTreemapRow(row, rowArea, cursorX, cursorY, remainingWidth, remainingHeight, depth);
+    layouts.push(...placed.layouts);
+  }
 
   return layouts.filter((item) => item.width >= 1 && item.height >= 1);
 }
 
+function worstAspect(row, rowArea, side) {
+  if (!row.length || rowArea <= 0 || side <= 0) {
+    return Infinity;
+  }
+  const areas = row.map((item) => item.area);
+  const maxArea = Math.max(...areas);
+  const minArea = Math.max(1, Math.min(...areas));
+  const sideSquared = side * side;
+  const rowAreaSquared = rowArea * rowArea;
+  return Math.max(
+    (sideSquared * maxArea) / rowAreaSquared,
+    rowAreaSquared / (sideSquared * minArea)
+  );
+}
+
+function placeTreemapRow(row, rowArea, x, y, width, height, depth) {
+  const layouts = [];
+  const horizontal = width >= height;
+
+  if (horizontal) {
+    const rowHeight = Math.max(1, Math.min(height, rowArea / Math.max(1, width)));
+    let offsetX = x;
+    row.forEach((item, index) => {
+      const isLast = index === row.length - 1;
+      const itemWidth = isLast ? x + width - offsetX : item.area / rowHeight;
+      layouts.push(treemapRect(item.node, offsetX, y, itemWidth, rowHeight, depth));
+      offsetX += itemWidth;
+    });
+    return { layouts, x, y: y + rowHeight, width, height: Math.max(0, height - rowHeight) };
+  }
+
+  const rowWidth = Math.max(1, Math.min(width, rowArea / Math.max(1, height)));
+  let offsetY = y;
+  row.forEach((item, index) => {
+    const isLast = index === row.length - 1;
+    const itemHeight = isLast ? y + height - offsetY : item.area / rowWidth;
+    layouts.push(treemapRect(item.node, x, offsetY, rowWidth, itemHeight, depth));
+    offsetY += itemHeight;
+  });
+  return { layouts, x: x + rowWidth, y, width: Math.max(0, width - rowWidth), height };
+}
+
+function treemapRect(node, x, y, width, height, depth) {
+  const gap = depth === 0 ? TREEMAP_GAP : Math.max(1, TREEMAP_GAP - 1);
+  return {
+    node,
+    x: x + gap / 2,
+    y: y + gap / 2,
+    width: Math.max(0, width - gap),
+    height: Math.max(0, height - gap),
+    depth,
+  };
+}
+
 function createTile(layout) {
   const { node, x, y, width, height } = layout;
+  const nestedChildren = nestedTreemapChildren(node, width, height, layout.depth);
   const tile = document.createElement("div");
   tile.className = [
     "tile",
     node.kind,
+    nestedChildren.length ? "container" : "leaf",
     state.selectedNode?.path === node.path ? "selected" : "",
     node.childrenLoaded === false ? "unloaded" : "",
     node.childrenLoading ? "loading-node" : "",
@@ -577,7 +660,22 @@ function createTile(layout) {
   tile.style.background = colorForNode(node);
   tile.title = `${node.path}\n${formatBytes(node.size)}`;
 
-  if (width > 52 && height > 30) {
+  if (nestedChildren.length) {
+    const header = document.createElement("div");
+    header.className = "tile-header";
+    header.innerHTML = `
+      <span>${escapeHtml(node.name)}</span>
+      <small>${escapeHtml(tileSizeLabel(node))}</small>
+    `;
+    tile.appendChild(header);
+
+    const childY = TREEMAP_HEADER_HEIGHT;
+    const childHeight = Math.max(0, height - TREEMAP_HEADER_HEIGHT);
+    const childLayouts = layoutSquarified(nestedChildren, 0, childY, width, childHeight, layout.depth + 1);
+    for (const childLayout of childLayouts) {
+      tile.appendChild(createTile(childLayout));
+    }
+  } else if (width > TREEMAP_MIN_LABEL_WIDTH && height > TREEMAP_MIN_LABEL_HEIGHT) {
     const label = document.createElement("div");
     label.className = "tile-label";
     label.innerHTML = `
@@ -598,6 +696,20 @@ function createTile(layout) {
   attachNodeContextMenu(tile, node);
 
   return tile;
+}
+
+function nestedTreemapChildren(node, width, height, depth) {
+  if (
+    !isExpandableDir(node) ||
+    node.childrenLoaded === false ||
+    depth >= TREEMAP_MAX_NEST_DEPTH ||
+    width < TREEMAP_MIN_NEST_WIDTH ||
+    height < TREEMAP_MIN_NEST_HEIGHT
+  ) {
+    return [];
+  }
+
+  return (node.children || []).filter(isVisibleChild);
 }
 
 function enterNode(node) {
@@ -1132,17 +1244,19 @@ function colorForNode(node) {
     return "linear-gradient(135deg, #7a2e2a, #b54f42)";
   }
   if (node.virtualNode || node.kind === "aggregate") {
-    return "linear-gradient(135deg, #555d69, #3f4651)";
+    return "linear-gradient(135deg, #4b515b, #343a43)";
   }
   if (node.kind === "file") {
-    return "linear-gradient(135deg, #8a6330, #c18634)";
+    const lightA = 43 + (hashString(node.path) % 8);
+    const lightB = Math.min(62, lightA + 10);
+    return `linear-gradient(135deg, hsl(207 35% ${lightA}%), hsl(209 40% ${lightB}%))`;
   }
 
-  const hue = hashString(node.path) % 360;
-  const sat = 38 + (hashString(node.name) % 18);
-  const lightA = 34 + (hashString(`${node.path}:a`) % 10);
-  const lightB = Math.min(58, lightA + 10);
-  return `linear-gradient(135deg, hsl(${hue} ${sat}% ${lightA}%), hsl(${(hue + 18) % 360} ${sat}% ${lightB}%))`;
+  const hue = 31 + (hashString(node.path) % 12);
+  const sat = 28 + (hashString(node.name) % 10);
+  const lightA = 41 + (hashString(`${node.path}:a`) % 8);
+  const lightB = Math.min(60, lightA + 9);
+  return `linear-gradient(135deg, hsl(${hue} ${sat}% ${lightA}%), hsl(${hue + 5} ${sat}% ${lightB}%))`;
 }
 
 function kindLabel(node) {

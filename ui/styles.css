@@ -476,7 +476,7 @@ input:disabled {
   min-width: 1px;
   min-height: 1px;
   border: 1px solid rgba(0, 0, 0, 0.36);
-  border-radius: 5px;
+  border-radius: 3px;
   overflow: hidden;
   cursor: default;
   transition:
@@ -487,6 +487,17 @@ input:disabled {
 
 .tile.dir {
   cursor: pointer;
+}
+
+.tile.container {
+  border-color: rgba(0, 0, 0, 0.48);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    inset 0 18px 0 rgba(255, 255, 255, 0.06);
+}
+
+.tile.leaf {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 
 .tile.unloaded {
@@ -522,10 +533,48 @@ input:disabled {
 .tile-label {
   position: absolute;
   inset: 6px;
+  display: grid;
+  place-content: center;
   overflow: hidden;
   color: rgba(255, 255, 255, 0.95);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
   pointer-events: none;
+  text-align: center;
+}
+
+.tile-header {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 6px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.36);
+  background: rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 11px;
+  font-weight: 700;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.66);
+}
+
+.tile-header span,
+.tile-header small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-header small {
+  font-size: 10px;
+  font-weight: 650;
+  opacity: 0.88;
 }
 
 .tile-name {
