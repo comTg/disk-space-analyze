@@ -13,6 +13,8 @@ const state = {
   scanPath: null,
   issues: [],
   contextNode: null,
+  largestSortKey: "size",
+  largestSortDir: "desc",
 };
 
 const els = {
@@ -68,7 +70,7 @@ function bindEvents() {
   els.cancelButton.addEventListener("click", cancelScan);
   els.rescanButton.addEventListener("click", () => {
     if (state.currentNode?.path) {
-      startRootScan(state.currentNode.path);
+      refreshCurrentDirectory();
     }
   });
   els.refreshDrivesButton.addEventListener("click", loadRoots);
@@ -243,6 +245,21 @@ async function startExpandScan(node) {
   setStatus(`准备扫描目录：${node.path}`);
 
   await requestBackendScan(node.path, scanId);
+}
+
+function refreshCurrentDirectory() {
+  if (!state.currentNode?.path) {
+    return;
+  }
+  if (state.scanning) {
+    setStatus("扫描进行中，请先取消当前扫描。");
+    return;
+  }
+  if (!state.rootNode || state.currentNode.path === state.rootNode.path) {
+    startRootScan(state.currentNode.path);
+    return;
+  }
+  startExpandScan(state.currentNode);
 }
 
 function beginScan(mode, path) {
@@ -648,33 +665,148 @@ function renderLargestList() {
     return;
   }
 
-  const items = state.currentNode.children
-    .filter(isVisibleChild)
-    .slice(0, 18)
-    .map((child) => {
-      const row = document.createElement("div");
-      row.className = "largest-item";
+  const rows = sortedLargestChildren();
+  if (!rows.length) {
+    els.largestList.innerHTML = `<div class="muted">暂无可显示项目</div>`;
+    return;
+  }
 
-      const button = document.createElement("button");
-      button.textContent = child.name;
-      button.title = child.path;
-      button.addEventListener("click", () => {
-        if (child.kind === "dir" && !child.virtualNode) {
-          enterNode(child);
-        } else {
-          selectNode(child);
-        }
-      });
+  const table = document.createElement("table");
+  table.className = "largest-table";
+  const thead = document.createElement("thead");
+  const tbody = document.createElement("tbody");
+  const columns = [
+    ["name", "名称"],
+    ["size", "大小"],
+    ["percent", "占比"],
+    ["fileCount", "文件"],
+    ["dirCount", "目录"],
+  ];
 
-      const size = document.createElement("small");
-      size.textContent = tileSizeLabel(child);
-
-      row.append(button, size);
-      attachNodeContextMenu(row, child);
-      return row;
+  const headerRow = document.createElement("tr");
+  for (const [key, label] of columns) {
+    const th = document.createElement("th");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${label}${sortMark(key)}`;
+    button.addEventListener("click", () => {
+      setLargestSort(key);
     });
+    th.appendChild(button);
+    headerRow.appendChild(th);
+  }
+  thead.appendChild(headerRow);
 
-  els.largestList.replaceChildren(...items);
+  const totalSize = sizeTotalForPercent(rows);
+  for (const child of rows) {
+    const row = document.createElement("tr");
+    row.className = state.selectedNode?.path === child.path ? "selected" : "";
+
+    const nameCell = document.createElement("td");
+    const nameButton = document.createElement("button");
+    nameButton.className = "largest-name";
+    nameButton.textContent = child.name;
+    nameButton.title = child.path;
+    nameButton.addEventListener("click", () => {
+      if (child.kind === "dir" && !child.virtualNode) {
+        enterNode(child);
+      } else {
+        selectNode(child);
+      }
+    });
+    nameCell.appendChild(nameButton);
+
+    row.append(
+      nameCell,
+      tableCell(tileSizeLabel(child), "number"),
+      tableCell(formatPercent(child.size, totalSize), "number"),
+      tableCell(formatNumber(child.fileCount), "number"),
+      tableCell(formatNumber(displayDirCount(child)), "number")
+    );
+
+    attachNodeContextMenu(row, child);
+    tbody.appendChild(row);
+  }
+
+  table.append(thead, tbody);
+  els.largestList.replaceChildren(table);
+}
+
+function sortedLargestChildren() {
+  return [...(state.currentNode?.children || [])]
+    .filter(isVisibleChild)
+    .sort(compareLargestRows);
+}
+
+function compareLargestRows(a, b) {
+  const key = state.largestSortKey;
+  const dir = state.largestSortDir === "asc" ? 1 : -1;
+  const valueA = largestSortValue(a, key);
+  const valueB = largestSortValue(b, key);
+
+  if (typeof valueA === "string" || typeof valueB === "string") {
+    const compared = String(valueA).localeCompare(String(valueB), "zh-CN", {
+      numeric: true,
+      sensitivity: "base",
+    });
+    return compared * dir || fallbackLargestCompare(a, b);
+  }
+
+  return ((valueA > valueB ? 1 : valueA < valueB ? -1 : 0) * dir) || fallbackLargestCompare(a, b);
+}
+
+function fallbackLargestCompare(a, b) {
+  return (b.size - a.size) || String(a.name).localeCompare(String(b.name), "zh-CN", { numeric: true });
+}
+
+function largestSortValue(node, key) {
+  if (key === "name") return node.name || "";
+  if (key === "percent" || key === "size") return Number(node.size || 0);
+  if (key === "fileCount") return Number(node.fileCount || 0);
+  if (key === "dirCount") return displayDirCount(node);
+  return Number(node.size || 0);
+}
+
+function setLargestSort(key) {
+  if (state.largestSortKey === key) {
+    state.largestSortDir = state.largestSortDir === "asc" ? "desc" : "asc";
+  } else {
+    state.largestSortKey = key;
+    state.largestSortDir = key === "name" ? "asc" : "desc";
+  }
+  renderLargestList();
+}
+
+function sortMark(key) {
+  if (state.largestSortKey !== key) {
+    return "";
+  }
+  return state.largestSortDir === "asc" ? " ↑" : " ↓";
+}
+
+function tableCell(text, className = "") {
+  const cell = document.createElement("td");
+  if (className) {
+    cell.className = className;
+  }
+  cell.textContent = text;
+  return cell;
+}
+
+function sizeTotalForPercent(rows) {
+  return Number(state.currentNode?.size || 0) || rows.reduce((sum, item) => sum + Number(item.size || 0), 0);
+}
+
+function formatPercent(size, total) {
+  if (!total || !size) {
+    return "0%";
+  }
+  const value = (Number(size) / Number(total)) * 100;
+  return `${value >= 10 ? value.toFixed(1) : value >= 1 ? value.toFixed(2) : "<1"}%`;
+}
+
+function displayDirCount(node) {
+  return Math.max(0, Number(node.dirCount || 0) - (node.kind === "dir" ? 1 : 0));
 }
 
 function renderSelectedInfo() {

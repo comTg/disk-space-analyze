@@ -16,7 +16,7 @@ use std::{
 use sysinfo::Disks;
 use tauri::{AppHandle, Emitter, State};
 
-const MAX_CHILDREN_PER_DIR: usize = 700;
+const MAX_CHILDREN_PER_DIR: usize = 50;
 const MAX_ERROR_SAMPLES: usize = 80;
 const PROGRESS_EVERY_ENTRIES: u64 = 250;
 const PARTIAL_EVERY_MS: u64 = 350;

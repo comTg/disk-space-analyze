@@ -625,6 +625,81 @@ input:disabled {
   color: var(--muted);
 }
 
+.largest-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.largest-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+}
+
+.largest-table th,
+.largest-table td {
+  min-width: 0;
+  padding: 6px 5px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.largest-table th {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.largest-table th:first-child,
+.largest-table td:first-child {
+  width: 42%;
+}
+
+.largest-table th:nth-child(2),
+.largest-table td:nth-child(2) {
+  width: 20%;
+}
+
+.largest-table th:nth-child(n + 3),
+.largest-table td:nth-child(n + 3) {
+  width: 12.6%;
+}
+
+.largest-table th button,
+.largest-name {
+  width: 100%;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.largest-table th button:hover,
+.largest-name:hover {
+  background: transparent;
+  color: #ffffff;
+}
+
+.largest-table .number {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.largest-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.largest-table tr.selected td {
+  color: #ffffff;
+}
+
 .issue-item {
   padding: 7px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
