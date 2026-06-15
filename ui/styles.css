@@ -12,10 +12,15 @@
   --danger: #e26d5c;
   --focus: #69a8ff;
   --shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  --scroll-track: #11161d;
+  --scroll-thumb: #495363;
+  --scroll-thumb-hover: #657184;
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
+  scrollbar-width: thin;
 }
 
 body {
@@ -30,6 +35,30 @@ body {
     system-ui,
     sans-serif;
   letter-spacing: 0;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scroll-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border: 2px solid var(--scroll-track);
+  border-radius: 999px;
+  background: var(--scroll-thumb);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--scroll-track);
 }
 
 button,
@@ -71,6 +100,11 @@ input {
 input:focus {
   outline: 2px solid rgba(105, 168, 255, 0.3);
   border-color: var(--focus);
+}
+
+input:disabled {
+  cursor: default;
+  opacity: 0.62;
 }
 
 .app-shell {
@@ -182,6 +216,7 @@ input:focus {
   flex-direction: column;
   gap: 8px;
   padding-right: 2px;
+  scrollbar-gutter: stable;
 }
 
 .drive-item {
@@ -196,6 +231,10 @@ input:focus {
 
 .drive-item:hover {
   border-color: #617086;
+}
+
+.drive-item:disabled {
+  opacity: 0.62;
 }
 
 .drive-title {
@@ -240,6 +279,40 @@ input:focus {
   font-size: 12px;
   line-height: 1.4;
   word-break: break-all;
+}
+
+.scan-progress {
+  height: 8px;
+  margin-top: 10px;
+  opacity: 0.55;
+}
+
+.scan-progress-track {
+  position: relative;
+  height: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  background: #101318;
+  overflow: hidden;
+}
+
+.scan-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent),
+    linear-gradient(90deg, #4fb477, #4f7fb4, #e3a245);
+}
+
+.scan-progress.active {
+  opacity: 1;
+}
+
+.scan-progress.active .scan-progress-fill {
+  width: 42%;
+  animation: progress-slide 1.05s ease-in-out infinite;
 }
 
 .metric-grid {
@@ -343,6 +416,36 @@ input:focus {
   place-items: center;
 }
 
+.treemap.loading::before {
+  content: "";
+  position: absolute;
+  z-index: 20;
+  top: 14px;
+  right: 82px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 760ms linear infinite;
+}
+
+.treemap.loading::after {
+  content: attr(data-loading-label);
+  position: absolute;
+  z-index: 19;
+  top: 10px;
+  right: 10px;
+  min-height: 24px;
+  padding: 4px 10px 4px 28px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(12, 15, 20, 0.76);
+  color: var(--soft);
+  font-size: 12px;
+  backdrop-filter: blur(8px);
+}
+
 .empty-state {
   display: grid;
   gap: 8px;
@@ -353,6 +456,19 @@ input:focus {
 .empty-state strong {
   color: var(--text);
   font-size: 18px;
+}
+
+.loading-state {
+  min-width: 260px;
+}
+
+.spinner {
+  width: 30px;
+  height: 30px;
+  border: 3px solid rgba(255, 255, 255, 0.16);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 800ms linear infinite;
 }
 
 .tile {
@@ -371,6 +487,24 @@ input:focus {
 
 .tile.dir {
   cursor: pointer;
+}
+
+.tile.unloaded {
+  outline: 1px dashed rgba(255, 255, 255, 0.25);
+  outline-offset: -5px;
+}
+
+.tile.loading-node::after {
+  content: "";
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 760ms linear infinite;
 }
 
 .tile:hover {
@@ -437,6 +571,7 @@ input:focus {
   color: var(--soft);
   font-size: 12px;
   line-height: 1.45;
+  scrollbar-gutter: stable;
 }
 
 .muted {
@@ -505,6 +640,50 @@ input:focus {
   margin-top: 3px;
 }
 
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 148px;
+  padding: 5px;
+  border: 1px solid #3d4654;
+  border-radius: 8px;
+  background: #171c23;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.42);
+}
+
+.context-menu button {
+  display: block;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--soft);
+  text-align: left;
+}
+
+.context-menu button:hover:not(:disabled) {
+  background: #27303d;
+  color: var(--text);
+}
+
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(245%);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 1120px) {
   .app-shell {
     grid-template-columns: 280px minmax(0, 1fr);
@@ -515,4 +694,3 @@ input:focus {
     grid-template-rows: 1fr 1fr;
   }
 }
-

@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use sysinfo::Disks;
 use tauri::{AppHandle, Emitter, State};
@@ -19,6 +19,7 @@ use tauri::{AppHandle, Emitter, State};
 const MAX_CHILDREN_PER_DIR: usize = 700;
 const MAX_ERROR_SAMPLES: usize = 80;
 const PROGRESS_EVERY_ENTRIES: u64 = 250;
+const PARTIAL_EVERY_MS: u64 = 350;
 
 static NEXT_SCAN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -58,6 +59,7 @@ struct FsNode {
     modified_unix_secs: Option<u64>,
     issue: Option<String>,
     virtual_node: bool,
+    children_loaded: bool,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -81,6 +83,15 @@ struct ScanProgress {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ScanPartial {
+    scan_id: String,
+    root: FsNode,
+    elapsed_ms: u128,
+    stats: ScanStats,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScanFinished {
     scan_id: String,
     root: Option<FsNode>,
@@ -96,6 +107,7 @@ struct ScanContext {
     app: AppHandle,
     cancel: Arc<AtomicBool>,
     started_at: Instant,
+    last_partial_at: Instant,
     stats: ScanStats,
     issues: Vec<FsIssue>,
 }
@@ -124,6 +136,29 @@ impl ScanContext {
             ScanProgress {
                 scan_id: self.scan_id.clone(),
                 current_path: path_to_string(path),
+                elapsed_ms: self.started_at.elapsed().as_millis(),
+                stats: self.stats.clone(),
+            },
+        );
+    }
+
+    fn emit_partial(&mut self, root: &FsNode, force: bool) {
+        if !force && self.last_partial_at.elapsed() < Duration::from_millis(PARTIAL_EVERY_MS) {
+            return;
+        }
+
+        self.last_partial_at = Instant::now();
+        let mut root = root.clone();
+        root.children.sort_by(|a, b| b.size.cmp(&a.size));
+        if !root.children.iter().any(|child| child.virtual_node) {
+            compact_children(&mut root);
+        }
+
+        let _ = self.app.emit(
+            "scan-partial",
+            ScanPartial {
+                scan_id: self.scan_id.clone(),
+                root,
                 elapsed_ms: self.started_at.elapsed().as_millis(),
                 stats: self.stats.clone(),
             },
@@ -189,16 +224,23 @@ fn start_scan(
     app: AppHandle,
     state: State<'_, ScannerState>,
     path: String,
+    scan_id: Option<String>,
 ) -> Result<String, String> {
     let root_path = normalize_user_path(&path)?;
     if !root_path.exists() {
         return Err(format!("路径不存在: {}", path_to_string(&root_path)));
     }
     if !root_path.is_dir() {
-        return Err(format!("请选择目录或磁盘根目录: {}", path_to_string(&root_path)));
+        return Err(format!(
+            "请选择目录或磁盘根目录: {}",
+            path_to_string(&root_path)
+        ));
     }
 
-    let scan_id = format!("scan-{}", NEXT_SCAN_ID.fetch_add(1, Ordering::Relaxed));
+    let scan_id = scan_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| format!("scan-{}", NEXT_SCAN_ID.fetch_add(1, Ordering::Relaxed)));
     let cancel = Arc::new(AtomicBool::new(false));
     let registry = state.scans.clone();
     registry
@@ -214,12 +256,16 @@ fn start_scan(
             app: app.clone(),
             cancel: cancel.clone(),
             started_at,
+            last_partial_at: started_at,
             stats: ScanStats::default(),
             issues: Vec::new(),
         };
 
         ctx.emit_progress(&root_path);
-        let root = scan_node(&root_path, &mut ctx);
+        let root = scan_layer_node(&root_path, &mut ctx);
+        if let Some(root) = &root {
+            ctx.emit_partial(root, true);
+        }
         let cancelled = cancel.load(Ordering::Relaxed);
         let error = match &root {
             Some(_) => None,
@@ -306,7 +352,15 @@ fn reveal_path(path: String) -> Result<(), String> {
     }
 }
 
-fn scan_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
+fn scan_layer_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
+    scan_node_with_mode(path, ctx, true)
+}
+
+fn scan_summary_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
+    scan_node_with_mode(path, ctx, false)
+}
+
+fn scan_node_with_mode(path: &Path, ctx: &mut ScanContext, load_children: bool) -> Option<FsNode> {
     if ctx.cancel.load(Ordering::Relaxed) {
         return None;
     }
@@ -335,6 +389,7 @@ fn scan_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
             modified_unix_secs: modified_secs(&metadata),
             issue: Some("已跳过符号链接或目录联接点".to_string()),
             virtual_node: false,
+            children_loaded: true,
         });
     }
 
@@ -354,6 +409,7 @@ fn scan_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
             modified_unix_secs: modified_secs(&metadata),
             issue: None,
             virtual_node: false,
+            children_loaded: true,
         });
     }
 
@@ -371,6 +427,7 @@ fn scan_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
             modified_unix_secs: modified_secs(&metadata),
             issue: None,
             virtual_node: false,
+            children_loaded: load_children,
         };
 
         let entries = match fs::read_dir(path) {
@@ -387,13 +444,18 @@ fn scan_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
             if ctx.cancel.load(Ordering::Relaxed) {
                 break;
             }
+
             match entry {
                 Ok(entry) => {
-                    if let Some(child) = scan_node(&entry.path(), ctx) {
+                    if let Some(child) = scan_summary_node(&entry.path(), ctx) {
                         node.size = node.size.saturating_add(child.size);
                         node.file_count = node.file_count.saturating_add(child.file_count);
                         node.dir_count = node.dir_count.saturating_add(child.dir_count);
-                        node.children.push(child);
+
+                        if load_children {
+                            node.children.push(child);
+                            ctx.emit_partial(&node, false);
+                        }
                     }
                 }
                 Err(error) => {
@@ -402,8 +464,11 @@ fn scan_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
             }
         }
 
-        node.children.sort_by(|a, b| b.size.cmp(&a.size));
-        compact_children(&mut node);
+        if load_children {
+            node.children.sort_by(|a, b| b.size.cmp(&a.size));
+            compact_children(&mut node);
+        }
+
         return Some(node);
     }
 
@@ -419,6 +484,7 @@ fn scan_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
         modified_unix_secs: modified_secs(&metadata),
         issue: Some("未知文件类型".to_string()),
         virtual_node: false,
+        children_loaded: true,
     })
 }
 
@@ -449,6 +515,7 @@ fn compact_children(node: &mut FsNode) {
         modified_unix_secs: None,
         issue: None,
         virtual_node: true,
+        children_loaded: true,
     });
 }
 
@@ -465,6 +532,7 @@ fn error_node(path: &Path, message: String) -> FsNode {
         modified_unix_secs: None,
         issue: Some(message),
         virtual_node: false,
+        children_loaded: true,
     }
 }
 
@@ -517,4 +585,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

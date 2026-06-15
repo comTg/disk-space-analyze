@@ -7,7 +7,10 @@ const state = {
   parentByPath: new Map(),
   currentScanId: null,
   scanning: false,
+  scanMode: null,
+  scanPath: null,
   issues: [],
+  contextNode: null,
 };
 
 const els = {
@@ -18,6 +21,7 @@ const els = {
   refreshDrivesButton: document.querySelector("#refreshDrivesButton"),
   driveList: document.querySelector("#driveList"),
   statusText: document.querySelector("#statusText"),
+  scanProgress: document.querySelector("#scanProgress"),
   metricSize: document.querySelector("#metricSize"),
   metricFiles: document.querySelector("#metricFiles"),
   metricDirs: document.querySelector("#metricDirs"),
@@ -30,6 +34,7 @@ const els = {
   largestList: document.querySelector("#largestList"),
   selectedInfo: document.querySelector("#selectedInfo"),
   issueList: document.querySelector("#issueList"),
+  contextMenu: document.querySelector("#contextMenu"),
 };
 
 function tauriApi() {
@@ -48,25 +53,33 @@ async function init() {
   bindEvents();
   await bindTauriEvents();
   await loadRoots();
+  updateScanControls();
 }
 
 function bindEvents() {
-  els.scanButton.addEventListener("click", () => startScan(els.pathInput.value));
+  els.scanButton.addEventListener("click", () => startRootScan(els.pathInput.value));
   els.pathInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
-      startScan(els.pathInput.value);
+      startRootScan(els.pathInput.value);
     }
   });
   els.cancelButton.addEventListener("click", cancelScan);
   els.rescanButton.addEventListener("click", () => {
     if (state.currentNode?.path) {
-      startScan(state.currentNode.path);
+      startRootScan(state.currentNode.path);
     }
   });
   els.refreshDrivesButton.addEventListener("click", loadRoots);
   els.upButton.addEventListener("click", goUp);
   els.revealButton.addEventListener("click", revealSelectedPath);
   window.addEventListener("resize", () => renderTreemap());
+  window.addEventListener("blur", hideContextMenu);
+  document.addEventListener("click", hideContextMenu);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideContextMenu();
+    }
+  });
 }
 
 async function bindTauriEvents() {
@@ -78,23 +91,42 @@ async function bindTauriEvents() {
 
   await api.event.listen("scan-progress", (event) => {
     const payload = event.payload;
-    if (!payload || payload.scanId !== state.currentScanId) {
+    if (!isCurrentScan(payload)) {
       return;
     }
     updateStats(payload.stats);
     setStatus(`扫描中：${payload.currentPath}`);
   });
 
+  await api.event.listen("scan-partial", (event) => {
+    const payload = event.payload;
+    if (!isCurrentScan(payload) || !payload.root) {
+      return;
+    }
+    updateStats(payload.stats);
+    applyPartialScan(payload.root);
+    setStatus(`扫描中：${state.scanPath}`);
+  });
+
   await api.event.listen("scan-finished", (event) => {
     const payload = event.payload;
-    if (!payload || payload.scanId !== state.currentScanId) {
+    if (!isCurrentScan(payload)) {
       return;
     }
     finishScan(payload);
   });
 }
 
+function isCurrentScan(payload) {
+  return payload && payload.scanId === state.currentScanId;
+}
+
 async function loadRoots() {
+  if (state.scanning) {
+    setStatus("扫描进行中，请先取消当前扫描。");
+    return;
+  }
+
   els.driveList.innerHTML = `<div class="muted">正在读取驱动器...</div>`;
   try {
     state.roots = await invoke("list_roots");
@@ -118,9 +150,23 @@ function renderDriveList() {
       const button = document.createElement("button");
       button.className = "drive-item";
       button.title = drive.path;
+      button.disabled = state.scanning;
       button.addEventListener("click", () => {
+        if (state.scanning) {
+          setStatus("扫描进行中，请先取消当前扫描。");
+          return;
+        }
         els.pathInput.value = drive.path;
-        startScan(drive.path);
+        startRootScan(drive.path);
+      });
+      button.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        if (state.scanning) {
+          setStatus("扫描进行中，请先取消当前扫描。");
+          return;
+        }
+        els.pathInput.value = drive.path;
+        showPathContextMenu(event.clientX, event.clientY, drive.path);
       });
 
       const used = drive.totalSpace && drive.availableSpace != null
@@ -144,10 +190,14 @@ function renderDriveList() {
   );
 }
 
-async function startScan(path) {
+async function startRootScan(path) {
   const scanPath = String(path || "").trim();
   if (!scanPath) {
     setStatus("请输入要扫描的路径。");
+    return;
+  }
+  if (state.scanning) {
+    setStatus("扫描进行中，请先取消当前扫描。");
     return;
   }
 
@@ -157,28 +207,77 @@ async function startScan(path) {
   state.issues = [];
   state.nodeByPath.clear();
   state.parentByPath.clear();
-  state.scanning = true;
-  updateScanControls();
+  beginScan("root", scanPath);
   updateStats({});
-  renderEmpty(`正在准备扫描 ${scanPath}`);
+  renderLoading(`正在准备扫描 ${scanPath}`);
   setStatus(`准备扫描：${scanPath}`);
 
-  try {
-    const scanId = await invoke("start_scan", { path: scanPath });
-    state.currentScanId = scanId;
-    els.pathInput.value = scanPath;
-    setStatus(`扫描已开始：${scanPath}`);
-  } catch (error) {
-    state.scanning = false;
-    state.currentScanId = null;
-    updateScanControls();
-    renderEmpty("扫描启动失败");
-    setStatus(error.message || String(error));
+  await requestBackendScan(scanPath);
+}
+
+async function startExpandScan(node) {
+  if (!isExpandableDir(node)) {
+    return;
   }
+  if (state.scanning) {
+    setStatus("扫描进行中，请先取消当前扫描。");
+    return;
+  }
+
+  state.currentNode = node;
+  state.selectedNode = node;
+  state.issues = [];
+  node.childrenLoading = true;
+  beginScan("expand", node.path);
+  renderAll();
+  setStatus(`准备扫描目录：${node.path}`);
+
+  await requestBackendScan(node.path);
+}
+
+function beginScan(mode, path) {
+  state.scanning = true;
+  state.scanMode = mode;
+  state.scanPath = path;
+  state.currentScanId = createScanId();
+  hideContextMenu();
+  updateScanControls();
+}
+
+async function requestBackendScan(path) {
+  try {
+    const requestedScanId = state.currentScanId;
+    const scanId = await invoke("start_scan", { path, scanId: requestedScanId });
+    state.currentScanId = scanId || requestedScanId;
+    els.pathInput.value = path;
+    updateScanControls();
+    setStatus(`扫描已开始：${path}`);
+  } catch (error) {
+    failActiveScan(error.message || String(error));
+  }
+}
+
+function failActiveScan(message) {
+  const failedMode = state.scanMode;
+  const failedPath = state.scanPath;
+  state.scanning = false;
+  state.currentScanId = null;
+  state.scanMode = null;
+  state.scanPath = null;
+  clearLoadingFlags();
+  updateScanControls();
+
+  if (failedMode === "root") {
+    renderEmpty("扫描启动失败");
+  } else if (failedPath) {
+    renderAll();
+  }
+  setStatus(message);
 }
 
 async function cancelScan() {
   if (!state.currentScanId) {
+    setStatus("扫描正在启动，请稍候...");
     return;
   }
   try {
@@ -189,26 +288,107 @@ async function cancelScan() {
   }
 }
 
+function applyPartialScan(root) {
+  if (state.scanMode === "expand") {
+    mergeScannedNode(root, false);
+    renderAll();
+    return;
+  }
+
+  applyRootNode(root);
+  renderAll();
+}
+
 function finishScan(payload) {
+  const mode = state.scanMode;
+  const scanPath = state.scanPath;
   state.scanning = false;
+  state.currentScanId = null;
+  state.scanMode = null;
+  state.scanPath = null;
+  clearLoadingFlags();
   updateScanControls();
   updateStats(payload.stats);
   state.issues = payload.issues || [];
 
   if (!payload.root) {
-    renderEmpty(payload.error || "扫描未生成结果");
+    if (mode === "root") {
+      renderEmpty(payload.error || "扫描未生成结果");
+    } else {
+      renderAll();
+    }
     renderIssues();
     setStatus(payload.error || "扫描结束");
     return;
   }
 
-  state.rootNode = payload.root;
-  state.currentNode = payload.root;
-  state.selectedNode = payload.root;
-  indexTree(payload.root, null);
+  if (mode === "expand" && payload.root.path === scanPath) {
+    mergeScannedNode(payload.root, !payload.cancelled);
+    const expandedNode = state.nodeByPath.get(payload.root.path);
+    if (expandedNode) {
+      state.currentNode = expandedNode;
+      state.selectedNode = expandedNode;
+    }
+  } else {
+    applyRootNode(payload.root);
+  }
+
   renderAll();
   const elapsed = formatDuration(payload.elapsedMs || 0);
   setStatus(payload.cancelled ? `扫描已取消，用时 ${elapsed}` : `扫描完成，用时 ${elapsed}`);
+}
+
+function applyRootNode(root) {
+  const previousCurrentPath = state.currentNode?.path || root.path;
+  const previousSelectedPath = state.selectedNode?.path || root.path;
+  state.rootNode = root;
+  rebuildIndex();
+  state.currentNode = state.nodeByPath.get(previousCurrentPath) || state.rootNode;
+  state.selectedNode = state.nodeByPath.get(previousSelectedPath) || state.currentNode;
+}
+
+function mergeScannedNode(scannedNode, complete) {
+  if (!state.rootNode) {
+    applyRootNode(scannedNode);
+    return;
+  }
+
+  const previousCurrentPath = state.currentNode?.path;
+  const previousSelectedPath = state.selectedNode?.path;
+  const target = state.nodeByPath.get(scannedNode.path);
+  if (!target) {
+    return;
+  }
+
+  const preserved = {
+    size: target.size,
+    fileCount: target.fileCount,
+    dirCount: target.dirCount,
+  };
+  Object.assign(target, scannedNode);
+
+  if (!complete) {
+    target.size = preserved.size;
+    target.fileCount = preserved.fileCount;
+    target.dirCount = preserved.dirCount;
+    target.childrenLoaded = false;
+    target.childrenLoading = state.scanning && state.scanPath === target.path;
+  } else {
+    target.childrenLoaded = true;
+    target.childrenLoading = false;
+  }
+
+  rebuildIndex();
+  state.currentNode = state.nodeByPath.get(previousCurrentPath) || state.nodeByPath.get(target.path) || state.rootNode;
+  state.selectedNode = state.nodeByPath.get(previousSelectedPath) || state.currentNode;
+}
+
+function rebuildIndex() {
+  state.nodeByPath.clear();
+  state.parentByPath.clear();
+  if (state.rootNode) {
+    indexTree(state.rootNode, null);
+  }
 }
 
 function indexTree(node, parent) {
@@ -253,6 +433,7 @@ function renderBreadcrumbs() {
     button.textContent = item.name || item.path;
     button.title = item.path;
     button.addEventListener("click", () => enterNode(item));
+    attachNodeContextMenu(button, item);
     els.breadcrumbs.appendChild(button);
   });
 }
@@ -263,23 +444,33 @@ function renderTreemap() {
   }
 
   const root = state.currentNode;
-  els.treemap.classList.remove("empty");
+  els.treemap.classList.remove("empty", "loading", "loading-screen");
+  delete els.treemap.dataset.loadingLabel;
   els.treemap.replaceChildren();
 
-  const rect = els.treemap.getBoundingClientRect();
   const children = (root.children || []).filter((child) => child.size > 0);
-
-  if (!children.length) {
-    renderEmpty("该目录没有可显示的子项");
+  if (root.childrenLoading && !children.length) {
+    renderLoading(`正在扫描 ${root.name || root.path}`);
     return;
   }
 
+  if (!children.length) {
+    renderEmpty(root.childrenLoaded === false ? "该目录尚未展开" : "该目录没有可显示的子项");
+    return;
+  }
+
+  const rect = els.treemap.getBoundingClientRect();
   const layouts = layoutSlice(children, 0, 0, rect.width, rect.height, 0);
   const fragment = document.createDocumentFragment();
   for (const item of layouts) {
     fragment.appendChild(createTile(item));
   }
   els.treemap.appendChild(fragment);
+
+  if (root.childrenLoading || (state.scanning && state.scanPath === root.path)) {
+    els.treemap.classList.add("loading");
+    els.treemap.dataset.loadingLabel = "扫描中";
+  }
 }
 
 function layoutSlice(nodes, x, y, width, height, depth) {
@@ -317,7 +508,13 @@ function layoutSlice(nodes, x, y, width, height, depth) {
 function createTile(layout) {
   const { node, x, y, width, height } = layout;
   const tile = document.createElement("div");
-  tile.className = `tile ${node.kind}${state.selectedNode?.path === node.path ? " selected" : ""}`;
+  tile.className = [
+    "tile",
+    node.kind,
+    state.selectedNode?.path === node.path ? "selected" : "",
+    node.childrenLoaded === false ? "unloaded" : "",
+    node.childrenLoading ? "loading-node" : "",
+  ].filter(Boolean).join(" ");
   tile.style.left = `${x}px`;
   tile.style.top = `${y}px`;
   tile.style.width = `${Math.max(1, width)}px`;
@@ -330,22 +527,20 @@ function createTile(layout) {
     label.className = "tile-label";
     label.innerHTML = `
       <span class="tile-name">${escapeHtml(node.name)}</span>
-      <span class="tile-size">${formatBytes(node.size)}</span>
+      <span class="tile-size">${escapeHtml(tileSizeLabel(node))}</span>
     `;
     tile.appendChild(label);
   }
 
   tile.addEventListener("click", (event) => {
     event.stopPropagation();
-    state.selectedNode = node;
     if (node.kind === "dir" && !node.virtualNode) {
       enterNode(node);
     } else {
-      renderSelectedInfo();
-      renderTreemap();
-      updateScanControls();
+      selectNode(node);
     }
   });
+  attachNodeContextMenu(tile, node);
 
   return tile;
 }
@@ -354,9 +549,31 @@ function enterNode(node) {
   if (!node || node.virtualNode) {
     return;
   }
-  state.currentNode = node;
+
   state.selectedNode = node;
+  if (isExpandableDir(node) && node.childrenLoaded === false) {
+    if (state.scanning) {
+      renderSelectedInfo();
+      renderTreemap();
+      setStatus("扫描进行中，请先取消当前扫描。");
+      return;
+    }
+    startExpandScan(node);
+    return;
+  }
+
+  state.currentNode = node;
   renderAll();
+}
+
+function selectNode(node) {
+  if (!node) {
+    return;
+  }
+  state.selectedNode = node;
+  renderSelectedInfo();
+  renderTreemap();
+  updateScanControls();
 }
 
 function goUp() {
@@ -371,7 +588,7 @@ function goUp() {
 
 async function revealSelectedPath() {
   const target = state.selectedNode || state.currentNode;
-  if (!target?.path || target.virtualNode) {
+  if (!target?.path || target.virtualNode || state.scanning) {
     return;
   }
   try {
@@ -383,6 +600,7 @@ async function revealSelectedPath() {
 
 function renderCurrentInfo() {
   if (!state.currentNode) {
+    els.currentInfo.className = "info-block muted";
     els.currentInfo.textContent = "尚未扫描";
     return;
   }
@@ -392,7 +610,7 @@ function renderCurrentInfo() {
 
 function renderLargestList() {
   if (!state.currentNode?.children?.length) {
-    els.largestList.innerHTML = `<div class="muted">暂无子项</div>`;
+    els.largestList.innerHTML = `<div class="muted">${state.currentNode?.childrenLoading ? "正在扫描..." : "暂无子项"}</div>`;
     return;
   }
 
@@ -410,17 +628,15 @@ function renderLargestList() {
         if (child.kind === "dir" && !child.virtualNode) {
           enterNode(child);
         } else {
-          state.selectedNode = child;
-          renderSelectedInfo();
-          renderTreemap();
-          updateScanControls();
+          selectNode(child);
         }
       });
 
       const size = document.createElement("small");
-      size.textContent = formatBytes(child.size);
+      size.textContent = tileSizeLabel(child);
 
       row.append(button, size);
+      attachNodeContextMenu(row, child);
       return row;
     });
 
@@ -467,6 +683,9 @@ function infoRows(node) {
     ["文件", formatNumber(node.fileCount)],
     ["目录", formatNumber(Math.max(0, (node.dirCount || 0) - (node.kind === "dir" ? 1 : 0)))],
   ];
+  if (node.kind === "dir" && !node.virtualNode) {
+    rows.push(["子项", childrenStateLabel(node)]);
+  }
   if (node.extension) {
     rows.push(["扩展名", `.${node.extension}`]);
   }
@@ -488,6 +707,8 @@ function infoRows(node) {
 
 function renderEmpty(message) {
   els.treemap.classList.add("empty");
+  els.treemap.classList.remove("loading", "loading-screen");
+  delete els.treemap.dataset.loadingLabel;
   els.treemap.innerHTML = `
     <div class="empty-state">
       <strong>${escapeHtml(message)}</strong>
@@ -496,12 +717,33 @@ function renderEmpty(message) {
   `;
 }
 
+function renderLoading(message) {
+  els.treemap.classList.add("empty", "loading-screen");
+  els.treemap.classList.remove("loading");
+  delete els.treemap.dataset.loadingLabel;
+  els.treemap.innerHTML = `
+    <div class="empty-state loading-state">
+      <span class="spinner" aria-hidden="true"></span>
+      <strong>${escapeHtml(message)}</strong>
+      <span>正在统计当前层级的目录大小</span>
+    </div>
+  `;
+}
+
 function updateScanControls() {
+  els.pathInput.disabled = state.scanning;
   els.scanButton.disabled = state.scanning;
-  els.cancelButton.disabled = !state.scanning;
+  els.cancelButton.disabled = !state.scanning || !state.currentScanId;
   els.rescanButton.disabled = state.scanning || !state.currentNode?.path;
+  els.refreshDrivesButton.disabled = state.scanning;
   els.upButton.disabled = !state.currentNode || !state.parentByPath.has(state.currentNode.path);
   els.revealButton.disabled = state.scanning || !(state.selectedNode || state.currentNode);
+  els.scanProgress?.classList.toggle("active", state.scanning);
+  document.body.classList.toggle("is-scanning", state.scanning);
+
+  for (const button of els.driveList.querySelectorAll(".drive-item")) {
+    button.disabled = state.scanning;
+  }
 }
 
 function updateStats(stats = {}) {
@@ -513,6 +755,126 @@ function updateStats(stats = {}) {
 
 function setStatus(message) {
   els.statusText.textContent = message;
+}
+
+function createScanId() {
+  return `ui-scan-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function attachNodeContextMenu(element, node) {
+  element.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    selectNode(node);
+    showNodeContextMenu(event.clientX, event.clientY, node);
+  });
+}
+
+function showNodeContextMenu(x, y, node) {
+  state.contextNode = node;
+  const items = [
+    {
+      label: node.kind === "dir" ? "选中目录" : "选中项目",
+      action: () => selectNode(node),
+    },
+  ];
+
+  if (isExpandableDir(node)) {
+    items.push({
+      label: node.childrenLoaded === false ? "扫描并进入" : "进入目录",
+      disabled: state.scanning,
+      action: () => enterNode(node),
+    });
+    items.push({
+      label: "重新扫描此层",
+      disabled: state.scanning,
+      action: () => startExpandScan(node),
+    });
+  }
+
+  if (!node.virtualNode) {
+    items.push({
+      label: "打开位置",
+      disabled: state.scanning,
+      action: revealSelectedPath,
+    });
+  }
+
+  renderContextMenu(x, y, items);
+}
+
+function showPathContextMenu(x, y, path) {
+  renderContextMenu(x, y, [
+    {
+      label: "选中路径",
+      action: () => {
+        els.pathInput.value = path;
+      },
+    },
+    {
+      label: "扫描路径",
+      disabled: state.scanning,
+      action: () => startRootScan(path),
+    },
+  ]);
+}
+
+function renderContextMenu(x, y, items) {
+  els.contextMenu.replaceChildren(
+    ...items.map((item) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = item.label;
+      button.disabled = Boolean(item.disabled);
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        hideContextMenu();
+        item.action();
+      });
+      return button;
+    })
+  );
+
+  els.contextMenu.hidden = false;
+  const { innerWidth, innerHeight } = window;
+  const rect = els.contextMenu.getBoundingClientRect();
+  els.contextMenu.style.left = `${Math.min(x, innerWidth - rect.width - 8)}px`;
+  els.contextMenu.style.top = `${Math.min(y, innerHeight - rect.height - 8)}px`;
+}
+
+function hideContextMenu() {
+  if (!els.contextMenu.hidden) {
+    els.contextMenu.hidden = true;
+    els.contextMenu.replaceChildren();
+  }
+}
+
+function clearLoadingFlags(node = state.rootNode) {
+  if (!node) {
+    return;
+  }
+  node.childrenLoading = false;
+  for (const child of node.children || []) {
+    clearLoadingFlags(child);
+  }
+}
+
+function isExpandableDir(node) {
+  return node?.kind === "dir" && !node.virtualNode;
+}
+
+function childrenStateLabel(node) {
+  if (node.childrenLoading) {
+    return "扫描中";
+  }
+  return node.childrenLoaded === false ? "待展开" : "已展开";
+}
+
+function tileSizeLabel(node) {
+  const suffix = node.kind === "dir" && !node.virtualNode && node.childrenLoaded === false
+    ? " · 待展开"
+    : "";
+  return `${formatBytes(node.size)}${suffix}`;
 }
 
 function colorForNode(node) {

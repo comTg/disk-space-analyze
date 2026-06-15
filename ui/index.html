@@ -42,6 +42,11 @@
             <span>扫描状态</span>
           </div>
           <div id="statusText" class="status-text">等待扫描</div>
+          <div id="scanProgress" class="scan-progress" aria-hidden="true">
+            <div class="scan-progress-track">
+              <div class="scan-progress-fill"></div>
+            </div>
+          </div>
           <div class="metric-grid">
             <div>
               <span id="metricSize">0 B</span>
@@ -113,7 +118,7 @@
       </main>
     </div>
 
+    <div id="contextMenu" class="context-menu" hidden></div>
     <script src="./app.js"></script>
   </body>
 </html>
-
