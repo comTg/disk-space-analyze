@@ -440,6 +440,50 @@ fn scan_node_with_mode(path: &Path, ctx: &mut ScanContext, load_children: bool) 
             }
         };
 
+        if load_children {
+            for entry in entries {
+                if ctx.cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                match entry {
+                    Ok(entry) => {
+                        if let Some(child) = scan_shallow_node(&entry.path(), ctx) {
+                            add_child_totals(&mut node, &child);
+                            node.children.push(child);
+                            ctx.emit_partial(&node, false);
+                        }
+                    }
+                    Err(error) => {
+                        ctx.note_issue(path, error.to_string());
+                    }
+                }
+            }
+
+            ctx.emit_partial(&node, true);
+
+            for index in 0..node.children.len() {
+                if ctx.cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                if node.children[index].kind != "dir" || node.children[index].virtual_node {
+                    continue;
+                }
+
+                let old_child = node.children[index].clone();
+                let child_path = PathBuf::from(old_child.path.clone());
+                if let Some(summary) = scan_summary_node(&child_path, ctx) {
+                    replace_child_totals(&mut node, &old_child, &summary);
+                    node.children[index] = summary;
+                    ctx.emit_partial(&node, false);
+                }
+            }
+
+            node.children.sort_by(|a, b| b.size.cmp(&a.size));
+            compact_children(&mut node);
+            return Some(node);
+        }
+
         for entry in entries {
             if ctx.cancel.load(Ordering::Relaxed) {
                 break;
@@ -464,11 +508,6 @@ fn scan_node_with_mode(path: &Path, ctx: &mut ScanContext, load_children: bool) 
             }
         }
 
-        if load_children {
-            node.children.sort_by(|a, b| b.size.cmp(&a.size));
-            compact_children(&mut node);
-        }
-
         return Some(node);
     }
 
@@ -486,6 +525,113 @@ fn scan_node_with_mode(path: &Path, ctx: &mut ScanContext, load_children: bool) 
         virtual_node: false,
         children_loaded: true,
     })
+}
+
+fn scan_shallow_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
+    if ctx.cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    ctx.note_entry(path);
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            ctx.note_issue(path, error.to_string());
+            return Some(error_node(path, error.to_string()));
+        }
+    };
+
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Some(FsNode {
+            name: display_name(path),
+            path: path_to_string(path),
+            kind: "link".to_string(),
+            size: 0,
+            file_count: 0,
+            dir_count: 0,
+            children: Vec::new(),
+            extension: None,
+            modified_unix_secs: modified_secs(&metadata),
+            issue: Some("已跳过符号链接或目录联接点".to_string()),
+            virtual_node: false,
+            children_loaded: true,
+        });
+    }
+
+    if metadata.is_file() {
+        let size = metadata.len();
+        ctx.stats.files_scanned = ctx.stats.files_scanned.saturating_add(1);
+        ctx.stats.bytes_scanned = ctx.stats.bytes_scanned.saturating_add(size);
+        return Some(FsNode {
+            name: display_name(path),
+            path: path_to_string(path),
+            kind: "file".to_string(),
+            size,
+            file_count: 1,
+            dir_count: 0,
+            children: Vec::new(),
+            extension: file_extension(path),
+            modified_unix_secs: modified_secs(&metadata),
+            issue: None,
+            virtual_node: false,
+            children_loaded: true,
+        });
+    }
+
+    if metadata.is_dir() {
+        return Some(FsNode {
+            name: display_name(path),
+            path: path_to_string(path),
+            kind: "dir".to_string(),
+            size: 0,
+            file_count: 0,
+            dir_count: 1,
+            children: Vec::new(),
+            extension: None,
+            modified_unix_secs: modified_secs(&metadata),
+            issue: None,
+            virtual_node: false,
+            children_loaded: false,
+        });
+    }
+
+    Some(FsNode {
+        name: display_name(path),
+        path: path_to_string(path),
+        kind: "other".to_string(),
+        size: metadata.len(),
+        file_count: 0,
+        dir_count: 0,
+        children: Vec::new(),
+        extension: None,
+        modified_unix_secs: modified_secs(&metadata),
+        issue: Some("未知文件类型".to_string()),
+        virtual_node: false,
+        children_loaded: true,
+    })
+}
+
+fn add_child_totals(node: &mut FsNode, child: &FsNode) {
+    node.size = node.size.saturating_add(child.size);
+    node.file_count = node.file_count.saturating_add(child.file_count);
+    node.dir_count = node.dir_count.saturating_add(child.dir_count);
+}
+
+fn replace_child_totals(node: &mut FsNode, old_child: &FsNode, new_child: &FsNode) {
+    node.size = node
+        .size
+        .saturating_sub(old_child.size)
+        .saturating_add(new_child.size);
+    node.file_count = node
+        .file_count
+        .saturating_sub(old_child.file_count)
+        .saturating_add(new_child.file_count);
+    node.dir_count = node
+        .dir_count
+        .saturating_sub(old_child.dir_count)
+        .saturating_add(new_child.dir_count);
 }
 
 fn compact_children(node: &mut FsNode) {
