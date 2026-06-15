@@ -1,0 +1,8 @@
+/target/
+/src-tauri/target/
+/.idea/
+/.vscode/
+*.log
+*.tmp
+
+todo_list.md

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Main window permissions for disk scanning.","local":true,"windows":["main"],"permissions":["core:default","allow-scan"]}}

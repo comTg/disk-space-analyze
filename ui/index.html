@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Disk Space Analyze</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark"></div>
+          <div>
+            <h1>Disk Space Analyze</h1>
+            <p>磁盘空间扫描</p>
+          </div>
+        </div>
+
+        <section class="path-panel">
+          <label for="pathInput">扫描路径</label>
+          <div class="path-row">
+            <input id="pathInput" spellcheck="false" placeholder="例如 C:\ 或 Z:\project" />
+            <button id="scanButton" class="primary-button" title="开始扫描">扫描</button>
+          </div>
+          <div class="scan-actions">
+            <button id="cancelButton" disabled title="取消当前扫描">取消</button>
+            <button id="rescanButton" disabled title="重新扫描当前目录">重扫</button>
+          </div>
+        </section>
+
+        <section class="drive-panel">
+          <div class="section-heading">
+            <span>驱动器</span>
+            <button id="refreshDrivesButton" title="刷新驱动器列表">刷新</button>
+          </div>
+          <div id="driveList" class="drive-list"></div>
+        </section>
+
+        <section class="status-panel">
+          <div class="section-heading">
+            <span>扫描状态</span>
+          </div>
+          <div id="statusText" class="status-text">等待扫描</div>
+          <div class="metric-grid">
+            <div>
+              <span id="metricSize">0 B</span>
+              <small>已统计</small>
+            </div>
+            <div>
+              <span id="metricFiles">0</span>
+              <small>文件</small>
+            </div>
+            <div>
+              <span id="metricDirs">0</span>
+              <small>目录</small>
+            </div>
+            <div>
+              <span id="metricErrors">0</span>
+              <small>错误</small>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="breadcrumbs" id="breadcrumbs"></div>
+          <div class="view-controls">
+            <button id="upButton" disabled title="返回上层">上层</button>
+            <button id="revealButton" disabled title="在文件管理器中打开">打开位置</button>
+          </div>
+        </header>
+
+        <section class="visual-section">
+          <div id="treemap" class="treemap empty">
+            <div class="empty-state">
+              <strong>输入路径或选择驱动器开始扫描</strong>
+              <span>支持本机磁盘和已映射网络驱动器，例如 Z:\</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="details-section">
+          <div class="details-panel">
+            <div class="section-heading">
+              <span>当前视图</span>
+            </div>
+            <div id="currentInfo" class="info-block muted">尚未扫描</div>
+          </div>
+
+          <div class="details-panel">
+            <div class="section-heading">
+              <span>最大项目</span>
+            </div>
+            <div id="largestList" class="largest-list"></div>
+          </div>
+
+          <div class="details-panel">
+            <div class="section-heading">
+              <span>选中项</span>
+            </div>
+            <div id="selectedInfo" class="info-block muted">点击矩形查看详情，点击目录进入下一级。</div>
+          </div>
+
+          <div class="details-panel">
+            <div class="section-heading">
+              <span>访问问题</span>
+            </div>
+            <div id="issueList" class="issue-list muted">暂无</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
+
