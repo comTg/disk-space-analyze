@@ -395,6 +395,13 @@ function applyRootNode(root) {
 }
 
 function preserveLoadedSubtrees(node, existingNodes) {
+  if (node.virtualNode) {
+    for (const child of node.children || []) {
+      preserveLoadedSubtrees(child, existingNodes);
+    }
+    return;
+  }
+
   const existing = existingNodes.get(node.path);
   if (
     existing &&
@@ -877,9 +884,113 @@ async function revealSelectedPath() {
   }
 }
 
+async function deleteNode(node) {
+  if (!canDeleteNode(node)) {
+    setStatus(node?.virtualNode ? "分组不能直接删除，请展开后删除具体项目。" : "该项目不能删除。");
+    return;
+  }
+
+  const kind = node.kind === "dir" ? "目录" : "项目";
+  const confirmed = window.confirm(
+    `将${kind}“${node.name || node.path}”移到回收站？\n\n${node.path}\n\n可从系统回收站恢复。`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await invoke("delete_path", { path: node.path });
+    removeDeletedNode(node);
+    renderAll();
+    updateStats({});
+    setStatus(`已移到回收站：${node.path}`);
+  } catch (error) {
+    setStatus(error.message || String(error));
+  }
+}
+
 function revealableNode() {
   return [state.selectedNode, state.currentNode, state.currentNode?.viewParent]
     .find((node) => node?.path && !node.virtualNode) || null;
+}
+
+function canDeleteNode(node) {
+  return Boolean(node?.path && !node.virtualNode && parentForNode(node));
+}
+
+function removeDeletedNode(target) {
+  const parent = parentForNode(target);
+
+  if (state.rootNode) {
+    removeNodeFromTree(state.rootNode, target, []);
+  }
+  if (state.currentNode?.viewAggregate) {
+    removeNodeFromTree(state.currentNode, target, []);
+  }
+
+  if (sameRealNode(state.currentNode, target)) {
+    state.currentNode = parent || state.rootNode;
+  }
+  if (sameRealNode(state.selectedNode, target)) {
+    state.selectedNode = state.currentNode || parent || state.rootNode;
+  }
+
+  rebuildIndex();
+}
+
+function removeNodeFromTree(node, target, ancestors) {
+  if (!node?.children?.length) {
+    return false;
+  }
+
+  const directIndex = node.children.findIndex((child) => sameRealNode(child, target));
+  if (directIndex >= 0) {
+    const [removed] = node.children.splice(directIndex, 1);
+    subtractNodeTotals(node, removed);
+    for (const ancestor of ancestors) {
+      subtractNodeTotals(ancestor, removed);
+    }
+    updateAggregateLabel(node);
+    return true;
+  }
+
+  for (const child of [...node.children]) {
+    if (removeNodeFromTree(child, target, [...ancestors, node])) {
+      if (isEmptyAggregate(child)) {
+        node.children = node.children.filter((item) => item !== child);
+      } else {
+        updateAggregateLabel(child);
+      }
+      updateAggregateLabel(node);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function sameRealNode(node, target) {
+  return Boolean(node?.path && target?.path && !node.virtualNode && !target.virtualNode && node.path === target.path);
+}
+
+function subtractNodeTotals(node, removed) {
+  node.size = Math.max(0, Number(node.size || 0) - Number(removed.size || 0));
+  node.fileCount = Math.max(0, Number(node.fileCount || 0) - Number(removed.fileCount || 0));
+  node.dirCount = Math.max(0, Number(node.dirCount || 0) - Number(removed.dirCount || 0));
+}
+
+function isEmptyAggregate(node) {
+  return node?.kind === "aggregate" && node.virtualNode && !node.children?.length;
+}
+
+function updateAggregateLabel(node) {
+  if (node?.kind === "aggregate" && node.virtualNode && node.children?.length) {
+    node.name = `其他 ${aggregateChildrenCount(node.children)} 项`;
+  }
+}
+
+function aggregateChildrenCount(children) {
+  return (children || []).reduce((count, child) => count + aggregateItemCount(child), 0);
 }
 
 function renderCurrentInfo() {
@@ -1215,6 +1326,14 @@ function showNodeContextMenu(x, y, node) {
     });
   }
 
+  if (canDeleteNode(node)) {
+    items.push({
+      label: "移到回收站",
+      className: "danger",
+      action: () => deleteNode(node),
+    });
+  }
+
   renderContextMenu(x, y, items);
 }
 
@@ -1240,6 +1359,9 @@ function renderContextMenu(x, y, items) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = item.label;
+      if (item.className) {
+        button.className = item.className;
+      }
       button.disabled = Boolean(item.disabled);
       button.addEventListener("click", (event) => {
         event.stopPropagation();

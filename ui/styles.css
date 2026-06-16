@@ -916,6 +916,15 @@ input:disabled {
   color: var(--text);
 }
 
+.context-menu button.danger {
+  color: #f0a099;
+}
+
+.context-menu button.danger:hover:not(:disabled) {
+  background: rgba(226, 109, 92, 0.14);
+  color: #ffd4cf;
+}
+
 @keyframes progress-slide {
   0% {
     transform: translateX(-110%);

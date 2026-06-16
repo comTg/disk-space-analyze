@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Allows the main window to list drives, scan directories, cancel scans, and reveal selected paths.",
+          "description": "Allows the main window to list drives, scan directories, cancel scans, reveal selected paths, and move selected paths to the recycle bin.",
           "type": "string",
           "const": "allow-scan",
-          "markdownDescription": "Allows the main window to list drives, scan directories, cancel scans, and reveal selected paths."
+          "markdownDescription": "Allows the main window to list drives, scan directories, cancel scans, reveal selected paths, and move selected paths to the recycle bin."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

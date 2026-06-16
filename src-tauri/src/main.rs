@@ -7,8 +7,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -18,8 +18,9 @@ use tauri::{AppHandle, Emitter, State};
 
 const MAX_CHILDREN_PER_DIR: usize = 50;
 const MAX_ERROR_SAMPLES: usize = 80;
-const PROGRESS_EVERY_ENTRIES: u64 = 250;
-const PARTIAL_EVERY_MS: u64 = 350;
+const MAX_PARALLEL_SUMMARY_WORKERS: usize = 6;
+const PROGRESS_EVERY_ENTRIES: u64 = 1000;
+const PARTIAL_EVERY_MS: u64 = 900;
 
 static NEXT_SCAN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -110,12 +111,28 @@ struct ScanContext {
     last_partial_at: Instant,
     stats: ScanStats,
     issues: Vec<FsIssue>,
+    emit_events: bool,
+}
+
+#[derive(Clone)]
+struct SummaryTask {
+    child_index: usize,
+    old_child: FsNode,
+    path: PathBuf,
+}
+
+struct SummaryResult {
+    child_index: usize,
+    old_child: FsNode,
+    summary: Option<FsNode>,
+    stats: ScanStats,
+    issues: Vec<FsIssue>,
 }
 
 impl ScanContext {
     fn note_entry(&mut self, path: &Path) {
         self.stats.entries_scanned = self.stats.entries_scanned.saturating_add(1);
-        if self.stats.entries_scanned % PROGRESS_EVERY_ENTRIES == 0 {
+        if self.emit_events && self.stats.entries_scanned % PROGRESS_EVERY_ENTRIES == 0 {
             self.emit_progress(path);
         }
     }
@@ -143,6 +160,9 @@ impl ScanContext {
     }
 
     fn emit_partial(&mut self, root: &FsNode, force: bool) {
+        if !self.emit_events {
+            return;
+        }
         if !force && self.last_partial_at.elapsed() < Duration::from_millis(PARTIAL_EVERY_MS) {
             return;
         }
@@ -150,9 +170,7 @@ impl ScanContext {
         self.last_partial_at = Instant::now();
         let mut root = root.clone();
         root.children.sort_by(|a, b| b.size.cmp(&a.size));
-        if !root.children.iter().any(|child| child.virtual_node) {
-            compact_children(&mut root);
-        }
+        compact_children_for_transport(&mut root, false);
 
         let _ = self.app.emit(
             "scan-partial",
@@ -259,6 +277,7 @@ fn start_scan(
             last_partial_at: started_at,
             stats: ScanStats::default(),
             issues: Vec::new(),
+            emit_events: true,
         };
 
         ctx.emit_progress(&root_path);
@@ -350,6 +369,19 @@ fn reveal_path(path: String) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         return Ok(());
     }
+}
+
+#[tauri::command]
+fn delete_path(path: String) -> Result<(), String> {
+    let target = normalize_user_path(&path)?;
+    if !target.exists() {
+        return Err(format!("路径不存在: {}", path_to_string(&target)));
+    }
+    if target.parent().is_none() || target.file_name().is_none() {
+        return Err("不能删除磁盘根目录。".to_string());
+    }
+
+    trash::delete(&target).map_err(|error| format!("移到回收站失败: {error}"))
 }
 
 fn scan_layer_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
@@ -462,22 +494,18 @@ fn scan_node_with_mode(path: &Path, ctx: &mut ScanContext, load_children: bool) 
 
             ctx.emit_partial(&node, true);
 
-            for index in 0..node.children.len() {
-                if ctx.cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-                if node.children[index].kind != "dir" || node.children[index].virtual_node {
-                    continue;
-                }
-
-                let old_child = node.children[index].clone();
-                let child_path = PathBuf::from(old_child.path.clone());
-                if let Some(summary) = scan_summary_node(&child_path, ctx) {
-                    replace_child_totals(&mut node, &old_child, &summary);
-                    node.children[index] = summary;
-                    ctx.emit_partial(&node, false);
-                }
-            }
+            let summary_tasks = node
+                .children
+                .iter()
+                .enumerate()
+                .filter(|(_, child)| child.kind == "dir" && !child.virtual_node)
+                .map(|(child_index, child)| SummaryTask {
+                    child_index,
+                    old_child: child.clone(),
+                    path: PathBuf::from(child.path.clone()),
+                })
+                .collect::<Vec<_>>();
+            run_summary_tasks(summary_tasks, &mut node, ctx);
 
             node.children.sort_by(|a, b| b.size.cmp(&a.size));
             compact_children(&mut node);
@@ -613,6 +641,103 @@ fn scan_shallow_node(path: &Path, ctx: &mut ScanContext) -> Option<FsNode> {
     })
 }
 
+fn run_summary_tasks(tasks: Vec<SummaryTask>, parent: &mut FsNode, ctx: &mut ScanContext) {
+    if tasks.is_empty() || ctx.cancel.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let worker_count = summary_worker_count(tasks.len());
+    let tasks = Arc::new(tasks);
+    let next_task = Arc::new(AtomicUsize::new(0));
+    let (sender, receiver) = mpsc::channel::<SummaryResult>();
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let tasks = Arc::clone(&tasks);
+            let next_task = Arc::clone(&next_task);
+            let sender = sender.clone();
+            let cancel = Arc::clone(&ctx.cancel);
+            let app = ctx.app.clone();
+            let scan_id = ctx.scan_id.clone();
+            let started_at = ctx.started_at;
+
+            scope.spawn(move || loop {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let task_index = next_task.fetch_add(1, Ordering::Relaxed);
+                let Some(task) = tasks.get(task_index).cloned() else {
+                    break;
+                };
+
+                let mut local_ctx = ScanContext {
+                    scan_id: scan_id.clone(),
+                    app: app.clone(),
+                    cancel: Arc::clone(&cancel),
+                    started_at,
+                    last_partial_at: started_at,
+                    stats: ScanStats::default(),
+                    issues: Vec::new(),
+                    emit_events: false,
+                };
+                let summary = scan_summary_node(&task.path, &mut local_ctx);
+                if sender
+                    .send(SummaryResult {
+                        child_index: task.child_index,
+                        old_child: task.old_child,
+                        summary,
+                        stats: local_ctx.stats,
+                        issues: local_ctx.issues,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            });
+        }
+
+        drop(sender);
+        for result in receiver {
+            merge_stats(&mut ctx.stats, &result.stats);
+            merge_issues(&mut ctx.issues, result.issues);
+
+            if let Some(summary) = result.summary {
+                if result.child_index < parent.children.len() {
+                    replace_child_totals(parent, &result.old_child, &summary);
+                    parent.children[result.child_index] = summary;
+                    ctx.emit_partial(parent, false);
+                }
+            }
+        }
+    });
+}
+
+fn summary_worker_count(task_count: usize) -> usize {
+    let available = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2);
+    task_count
+        .min(available)
+        .min(MAX_PARALLEL_SUMMARY_WORKERS)
+        .max(1)
+}
+
+fn merge_stats(target: &mut ScanStats, source: &ScanStats) {
+    target.entries_scanned = target
+        .entries_scanned
+        .saturating_add(source.entries_scanned);
+    target.files_scanned = target.files_scanned.saturating_add(source.files_scanned);
+    target.dirs_scanned = target.dirs_scanned.saturating_add(source.dirs_scanned);
+    target.bytes_scanned = target.bytes_scanned.saturating_add(source.bytes_scanned);
+    target.errors = target.errors.saturating_add(source.errors);
+}
+
+fn merge_issues(target: &mut Vec<FsIssue>, source: Vec<FsIssue>) {
+    let remaining = MAX_ERROR_SAMPLES.saturating_sub(target.len());
+    target.extend(source.into_iter().take(remaining));
+}
+
 fn add_child_totals(node: &mut FsNode, child: &FsNode) {
     node.size = node.size.saturating_add(child.size);
     node.file_count = node.file_count.saturating_add(child.file_count);
@@ -635,7 +760,29 @@ fn replace_child_totals(node: &mut FsNode, old_child: &FsNode, new_child: &FsNod
 }
 
 fn compact_children(node: &mut FsNode) {
+    compact_children_with_mode(node, true);
+}
+
+fn compact_children_for_transport(node: &mut FsNode, keep_aggregate_children: bool) {
+    compact_children_with_mode(node, keep_aggregate_children);
+}
+
+fn compact_children_with_mode(node: &mut FsNode, keep_aggregate_children: bool) {
+    if node
+        .children
+        .iter()
+        .any(|child| child.virtual_node && child.kind == "aggregate")
+    {
+        if !keep_aggregate_children {
+            clear_transport_aggregate_children(node);
+        }
+        return;
+    }
+
     if node.children.len() <= MAX_CHILDREN_PER_DIR {
+        if !keep_aggregate_children {
+            clear_transport_aggregate_children(node);
+        }
         return;
     }
 
@@ -656,13 +803,25 @@ fn compact_children(node: &mut FsNode) {
         size,
         file_count,
         dir_count,
-        children: rest,
+        children: if keep_aggregate_children {
+            rest
+        } else {
+            Vec::new()
+        },
         extension: None,
         modified_unix_secs: None,
         issue: None,
         virtual_node: true,
         children_loaded: true,
     });
+}
+
+fn clear_transport_aggregate_children(node: &mut FsNode) {
+    for child in &mut node.children {
+        if child.virtual_node && child.kind == "aggregate" {
+            child.children.clear();
+        }
+    }
 }
 
 fn error_node(path: &Path, message: String) -> FsNode {
@@ -726,7 +885,8 @@ fn main() {
             list_roots,
             start_scan,
             cancel_scan,
-            reveal_path
+            reveal_path,
+            delete_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

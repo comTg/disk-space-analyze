@@ -1,10 +1,10 @@
 [[permission]]
 identifier = "allow-scan"
-description = "Allows the main window to list drives, scan directories, cancel scans, and reveal selected paths."
+description = "Allows the main window to list drives, scan directories, cancel scans, reveal selected paths, and move selected paths to the recycle bin."
 commands.allow = [
   "list_roots",
   "start_scan",
   "cancel_scan",
-  "reveal_path"
+  "reveal_path",
+  "delete_path"
 ]
-
