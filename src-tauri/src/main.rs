@@ -656,7 +656,7 @@ fn compact_children(node: &mut FsNode) {
         size,
         file_count,
         dir_count,
-        children: Vec::new(),
+        children: rest,
         extension: None,
         modified_unix_secs: None,
         issue: None,

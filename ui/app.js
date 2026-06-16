@@ -45,8 +45,10 @@ const TREEMAP_GAP = 3;
 const TREEMAP_HEADER_HEIGHT = 22;
 const TREEMAP_MIN_NEST_WIDTH = 150;
 const TREEMAP_MIN_NEST_HEIGHT = 92;
-const TREEMAP_MIN_LABEL_WIDTH = 56;
-const TREEMAP_MIN_LABEL_HEIGHT = 28;
+const TREEMAP_FULL_LABEL_WIDTH = 72;
+const TREEMAP_FULL_LABEL_HEIGHT = 42;
+const TREEMAP_COMPACT_LABEL_WIDTH = 64;
+const TREEMAP_COMPACT_LABEL_HEIGHT = 16;
 const TREEMAP_MAX_NEST_DEPTH = 4;
 
 function tauriApi() {
@@ -462,6 +464,12 @@ function indexTree(node, parent) {
   for (const child of node.children || []) {
     if (!child.virtualNode) {
       indexTree(child, node);
+    } else if (child.children?.length) {
+      for (const groupedChild of child.children) {
+        if (!groupedChild.virtualNode) {
+          indexTree(groupedChild, node);
+        }
+      }
     }
   }
 }
@@ -486,19 +494,32 @@ function renderBreadcrumbs() {
   let node = state.currentNode;
   while (node) {
     chain.unshift(node);
-    const parentPath = state.parentByPath.get(node.path);
-    node = parentPath ? state.nodeByPath.get(parentPath) : null;
+    node = parentForNode(node);
   }
 
   chain.forEach((item, index) => {
     const button = document.createElement("button");
     button.className = `breadcrumb${index === chain.length - 1 ? " active" : ""}`;
     button.textContent = item.name || item.path;
-    button.title = item.path;
+    button.title = breadcrumbTitle(item);
     button.addEventListener("click", () => enterNode(item));
     attachNodeContextMenu(button, item);
     els.breadcrumbs.appendChild(button);
   });
+}
+
+function parentForNode(node) {
+  if (node?.viewParent) {
+    return node.viewParent;
+  }
+  const parentPath = state.parentByPath.get(node?.path);
+  return parentPath ? state.nodeByPath.get(parentPath) : null;
+}
+
+function breadcrumbTitle(node) {
+  return node?.virtualNode && node?.path
+    ? `${node.name}\n${node.path}`
+    : node?.path || node?.name || "";
 }
 
 function renderTreemap() {
@@ -523,7 +544,7 @@ function renderTreemap() {
   }
 
   const rect = els.treemap.getBoundingClientRect();
-  const layouts = layoutSquarified(children, 0, 0, rect.width, rect.height, 0);
+  const layouts = layoutReadableTreemap(children, 0, 0, rect.width, rect.height, 0, root);
   const fragment = document.createDocumentFragment();
   for (const item of layouts) {
     fragment.appendChild(createTile(item));
@@ -587,6 +608,29 @@ function layoutSquarified(nodes, x, y, width, height, depth) {
   return layouts.filter((item) => item.width >= 1 && item.height >= 1);
 }
 
+function layoutReadableTreemap(nodes, x, y, width, height, depth, parentNode) {
+  let visibleNodes = nodes;
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const layouts = layoutSquarified(visibleNodes, x, y, width, height, depth);
+    const firstUnreadable = layouts.findIndex((item, index) => {
+      const tailCount = visibleNodes.length - index;
+      return tailCount >= 2 && !tileLabelMode(item.width, item.height);
+    });
+
+    if (firstUnreadable < 0) {
+      return layouts;
+    }
+
+    visibleNodes = [
+      ...visibleNodes.slice(0, firstUnreadable),
+      createTreemapAggregate(visibleNodes.slice(firstUnreadable), parentNode),
+    ];
+  }
+
+  return layoutSquarified(visibleNodes, x, y, width, height, depth);
+}
+
 function worstAspect(row, rowArea, side) {
   if (!row.length || rowArea <= 0 || side <= 0) {
     return Infinity;
@@ -644,14 +688,17 @@ function treemapRect(node, x, y, width, height, depth) {
 function createTile(layout) {
   const { node, x, y, width, height } = layout;
   const nestedChildren = nestedTreemapChildren(node, width, height, layout.depth);
+  const labelMode = tileLabelMode(width, height);
   const tile = document.createElement("div");
   tile.className = [
     "tile",
     node.kind,
+    isAggregateGroup(node) ? "group" : "",
     nestedChildren.length ? "container" : "leaf",
-    state.selectedNode?.path === node.path ? "selected" : "",
+    isSelectedNode(node) ? "selected" : "",
     node.childrenLoaded === false ? "unloaded" : "",
     node.childrenLoading ? "loading-node" : "",
+    !nestedChildren.length && !labelMode ? "unlabeled" : "",
   ].filter(Boolean).join(" ");
   tile.style.left = `${x}px`;
   tile.style.top = `${y}px`;
@@ -659,6 +706,8 @@ function createTile(layout) {
   tile.style.height = `${Math.max(1, height)}px`;
   tile.style.background = colorForNode(node);
   tile.title = `${node.path}\n${formatBytes(node.size)}`;
+  tile.dataset.tileName = node.name || node.path || "";
+  tile.dataset.tileSize = treemapSizeLabel(node);
 
   if (nestedChildren.length) {
     const header = document.createElement("div");
@@ -671,23 +720,26 @@ function createTile(layout) {
 
     const childY = TREEMAP_HEADER_HEIGHT;
     const childHeight = Math.max(0, height - TREEMAP_HEADER_HEIGHT);
-    const childLayouts = layoutSquarified(nestedChildren, 0, childY, width, childHeight, layout.depth + 1);
+    const childLayouts = layoutReadableTreemap(nestedChildren, 0, childY, width, childHeight, layout.depth + 1, node);
     for (const childLayout of childLayouts) {
       tile.appendChild(createTile(childLayout));
     }
-  } else if (width > TREEMAP_MIN_LABEL_WIDTH && height > TREEMAP_MIN_LABEL_HEIGHT) {
+  } else if (labelMode) {
     const label = document.createElement("div");
-    label.className = "tile-label";
+    label.className = `tile-label ${labelMode}`;
+    const sizeMarkup = labelMode === "full"
+      ? `<span class="tile-size">${escapeHtml(treemapSizeLabel(node))}</span>`
+      : "";
     label.innerHTML = `
       <span class="tile-name">${escapeHtml(node.name)}</span>
-      <span class="tile-size">${escapeHtml(tileSizeLabel(node))}</span>
+      ${sizeMarkup}
     `;
     tile.appendChild(label);
   }
 
   tile.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (node.kind === "dir" && !node.virtualNode) {
+    if (isAggregateGroup(node) || (node.kind === "dir" && !node.virtualNode)) {
       enterNode(node);
     } else {
       selectNode(node);
@@ -696,6 +748,63 @@ function createTile(layout) {
   attachNodeContextMenu(tile, node);
 
   return tile;
+}
+
+function tileLabelMode(width, height) {
+  if (width >= TREEMAP_FULL_LABEL_WIDTH && height >= TREEMAP_FULL_LABEL_HEIGHT) {
+    return "full";
+  }
+  if (width >= TREEMAP_COMPACT_LABEL_WIDTH && height >= TREEMAP_COMPACT_LABEL_HEIGHT) {
+    return "compact";
+  }
+  return "";
+}
+
+function createTreemapAggregate(nodes, parentNode) {
+  const summary = nodes.reduce((total, node) => ({
+    size: total.size + Number(node.size || 0),
+    fileCount: total.fileCount + Number(node.fileCount || 0),
+    dirCount: total.dirCount + Number(node.dirCount || 0),
+    itemCount: total.itemCount + aggregateItemCount(node),
+  }), { size: 0, fileCount: 0, dirCount: 0, itemCount: 0 });
+
+  return {
+    name: `其他 ${summary.itemCount} 项`,
+    path: parentNode?.path || nodes[0]?.path || "",
+    kind: "aggregate",
+    size: summary.size,
+    fileCount: summary.fileCount,
+    dirCount: summary.dirCount,
+    children: nodes,
+    viewParent: parentNode,
+    viewAggregate: true,
+    virtualNode: true,
+    childrenLoaded: true,
+  };
+}
+
+function aggregateItemCount(node) {
+  if (node?.virtualNode && node.kind === "aggregate") {
+    const match = String(node.name || "").match(/^其他\s+(\d+)\s+项$/);
+    if (match) {
+      return Number(match[1]);
+    }
+  }
+  return 1;
+}
+
+function isAggregateGroup(node) {
+  return node?.kind === "aggregate" && Array.isArray(node.children) && node.children.length > 0;
+}
+
+function isSelectedNode(node) {
+  if (state.selectedNode === node) {
+    return true;
+  }
+  if (node?.virtualNode || state.selectedNode?.virtualNode) {
+    return false;
+  }
+  return state.selectedNode?.path === node?.path;
 }
 
 function nestedTreemapChildren(node, width, height, depth) {
@@ -713,11 +822,18 @@ function nestedTreemapChildren(node, width, height, depth) {
 }
 
 function enterNode(node) {
-  if (!node || node.virtualNode) {
+  if (!node || (node.virtualNode && !isAggregateGroup(node))) {
     return;
   }
 
   state.selectedNode = node;
+  if (isAggregateGroup(node)) {
+    node.viewParent ||= state.currentNode;
+    state.currentNode = node;
+    renderAll();
+    return;
+  }
+
   if (isExpandableDir(node) && node.childrenLoaded === false) {
     state.currentNode = node;
     renderAll();
@@ -743,15 +859,15 @@ function goUp() {
   if (!state.currentNode) {
     return;
   }
-  const parentPath = state.parentByPath.get(state.currentNode.path);
-  if (parentPath) {
-    enterNode(state.nodeByPath.get(parentPath));
+  const parent = parentForNode(state.currentNode);
+  if (parent) {
+    enterNode(parent);
   }
 }
 
 async function revealSelectedPath() {
-  const target = state.selectedNode || state.currentNode;
-  if (!target?.path || target.virtualNode) {
+  const target = revealableNode();
+  if (!target?.path) {
     return;
   }
   try {
@@ -759,6 +875,11 @@ async function revealSelectedPath() {
   } catch (error) {
     setStatus(error.message || String(error));
   }
+}
+
+function revealableNode() {
+  return [state.selectedNode, state.currentNode, state.currentNode?.viewParent]
+    .find((node) => node?.path && !node.virtualNode) || null;
 }
 
 function renderCurrentInfo() {
@@ -812,7 +933,7 @@ function renderLargestList() {
   const totalSize = sizeTotalForPercent(rows);
   for (const child of rows) {
     const row = document.createElement("tr");
-    row.className = state.selectedNode?.path === child.path ? "selected" : "";
+    row.className = isSelectedNode(child) ? "selected" : "";
 
     const nameCell = document.createElement("td");
     const nameButton = document.createElement("button");
@@ -820,7 +941,7 @@ function renderLargestList() {
     nameButton.textContent = child.name;
     nameButton.title = child.path;
     nameButton.addEventListener("click", () => {
-      if (child.kind === "dir" && !child.virtualNode) {
+      if (isAggregateGroup(child) || (child.kind === "dir" && !child.virtualNode)) {
         enterNode(child);
       } else {
         selectNode(child);
@@ -964,6 +1085,8 @@ function infoRows(node) {
   ];
   if (node.kind === "dir" && !node.virtualNode) {
     rows.push(["子项", childrenStateLabel(node)]);
+  } else if (isAggregateGroup(node)) {
+    rows.push(["子项", `${formatNumber(node.children.length)} 项`]);
   }
   if (node.extension) {
     rows.push(["扩展名", `.${node.extension}`]);
@@ -1013,10 +1136,10 @@ function updateScanControls() {
   els.pathInput.disabled = state.scanning;
   els.scanButton.disabled = state.scanning;
   els.cancelButton.disabled = !state.scanning;
-  els.rescanButton.disabled = state.scanning || !state.currentNode?.path;
+  els.rescanButton.disabled = state.scanning || !state.currentNode?.path || state.currentNode?.virtualNode;
   els.refreshDrivesButton.disabled = state.scanning;
-  els.upButton.disabled = !state.currentNode || !state.parentByPath.has(state.currentNode.path);
-  els.revealButton.disabled = !(state.selectedNode || state.currentNode);
+  els.upButton.disabled = !parentForNode(state.currentNode);
+  els.revealButton.disabled = !revealableNode();
   els.scanProgress?.classList.toggle("active", state.scanning);
   document.body.classList.toggle("is-scanning", state.scanning);
 
@@ -1058,12 +1181,26 @@ function attachNodeContextMenu(element, node) {
 
 function showNodeContextMenu(x, y, node) {
   state.contextNode = node;
-  const items = [
-    {
+  const items = [];
+
+  if (!node.virtualNode) {
+    items.push({
+      label: "打开位置",
+      action: revealSelectedPath,
+    });
+  }
+
+  items.push({
       label: node.kind === "dir" ? "选中目录" : "选中项目",
       action: () => selectNode(node),
-    },
-  ];
+    });
+
+  if (isAggregateGroup(node)) {
+    items.push({
+      label: "展开分组",
+      action: () => enterNode(node),
+    });
+  }
 
   if (isExpandableDir(node)) {
     items.push({
@@ -1075,13 +1212,6 @@ function showNodeContextMenu(x, y, node) {
       label: "重新扫描此层",
       disabled: isPathScanning(node.path),
       action: () => startExpandScan(node),
-    });
-  }
-
-  if (!node.virtualNode) {
-    items.push({
-      label: "打开位置",
-      action: revealSelectedPath,
     });
   }
 
@@ -1241,6 +1371,13 @@ function tileSizeLabel(node) {
   return `${formatBytes(node.size)}${suffix}`;
 }
 
+function treemapSizeLabel(node) {
+  if (isExpandableDir(node) && node.size <= 0) {
+    return isPathScanning(node.path) || node.childrenLoading ? "计算中" : "待计算";
+  }
+  return formatBytes(node.size);
+}
+
 function largestSizeLabel(node) {
   if (isExpandableDir(node) && node.size <= 0) {
     return isPathScanning(node.path) || node.childrenLoading ? "计算中" : "待计算";
@@ -1269,6 +1406,7 @@ function colorForNode(node) {
 }
 
 function kindLabel(node) {
+  if (isAggregateGroup(node)) return "分组";
   if (node.virtualNode) return "合并项目";
   if (node.kind === "dir") return "目录";
   if (node.kind === "file") return "文件";
